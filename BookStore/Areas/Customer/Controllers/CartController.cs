@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Mvc;
 using System.Security.Claims;
 using BookStore.Utility;
 using Stripe.Checkout;
+using Microsoft.AspNetCore.Identity.UI.Services;
 
 namespace BookStore.Areas.Customer.Controllers
 {
@@ -14,12 +15,14 @@ namespace BookStore.Areas.Customer.Controllers
     public class CartController : Controller
     {
         private readonly IUnitOfWork _unitOfWork;
+        private readonly IEmailSender _emailSender;
         [BindProperty]
         public ShoppingCartVM ShoppingCartVM { get; set; }
         public int OrderTotal { get; set; }
-        public CartController(IUnitOfWork unitOfWork)
+        public CartController(IUnitOfWork unitOfWork, IEmailSender emailSender)
         {
             _unitOfWork = unitOfWork;
+            _emailSender = emailSender;
         }
 
         public IActionResult Index()
@@ -74,10 +77,16 @@ namespace BookStore.Areas.Customer.Controllers
         [ValidateAntiForgeryToken]
         public IActionResult SummaryPOST()
         {
+
             var claimsIdentity = (ClaimsIdentity)User.Identity;
             var claim = claimsIdentity.FindFirst(ClaimTypes.NameIdentifier);
 
             ShoppingCartVM.ListCart = _unitOfWork.ShoppingCart.GetAll(u => u.ApplicationUserId == claim.Value, includeProperties: "Product");
+
+            if (ShoppingCartVM.ListCart.Count() <= 0)
+            {
+                return View(ShoppingCartVM);
+            }
 
             ShoppingCartVM.OrderHeader.PaymentStatus = SD.PaymentStatusPending;
             ShoppingCartVM.OrderHeader.OrderStatus = SD.StatusPending;
@@ -139,16 +148,12 @@ namespace BookStore.Areas.Customer.Controllers
             }
 
             var service = new SessionService();
+
             Session session = service.Create(options);
             _unitOfWork.OrderHeader.UpdateStripePaymentID(ShoppingCartVM.OrderHeader.Id, session.Id, session.PaymentIntentId);
             _unitOfWork.Save();
             Response.Headers.Add("Location", session.Url);
             return new StatusCodeResult(303);
-
-
-            _unitOfWork.ShoppingCart.RemoveRange(ShoppingCartVM.ListCart);
-            _unitOfWork.Save();
-            return RedirectToAction("Index", "Home");
         }
 
         public IActionResult OrderConfirmation(int id)
@@ -162,8 +167,10 @@ namespace BookStore.Areas.Customer.Controllers
                 _unitOfWork.OrderHeader.UpdateStatus(id, SD.StatusApproved, SD.PaymentStatusApproved);
                 _unitOfWork.Save();
             }
+            _emailSender.SendEmailAsync(orderHeader.ApplicationUser.Email, "New Order - BookStore", "<p>New Order Created</p>");
             List<ShoppingCart> shoppingCarts = _unitOfWork.ShoppingCart.GetAll(u => u.ApplicationUserId ==
             orderHeader.ApplicationUserId).ToList();
+            HttpContext.Session.Clear();
             _unitOfWork.ShoppingCart.RemoveRange(shoppingCarts);
             _unitOfWork.Save();
             return View(id);
@@ -183,6 +190,8 @@ namespace BookStore.Areas.Customer.Controllers
             if (cart.Count <= 1)
             {
                 _unitOfWork.ShoppingCart.Remove(cart);
+                var count = _unitOfWork.ShoppingCart.GetAll(u => u.ApplicationUserId == cart.ApplicationUserId).ToList().Count - 1;
+                HttpContext.Session.SetInt32(SD.SessionCart, count);
             }
             else
             {
@@ -197,6 +206,8 @@ namespace BookStore.Areas.Customer.Controllers
             var cart = _unitOfWork.ShoppingCart.GetFirstOrDefault(u => u.Id == cartId);
             _unitOfWork.ShoppingCart.Remove(cart);
             _unitOfWork.Save();
+            var count = _unitOfWork.ShoppingCart.GetAll(u => u.ApplicationUserId == cart.ApplicationUserId).ToList().Count;
+            HttpContext.Session.SetInt32(SD.SessionCart, count);
             return RedirectToAction(nameof(Index));
         }
 
